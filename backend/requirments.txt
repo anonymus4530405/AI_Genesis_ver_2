@@ -1,0 +1,19 @@
+fastapi
+uvicorn
+python-dotenv
+requests
+tqdm
+numpy
+PyMuPDF
+
+# RAG / Vector Store
+langchain
+langchain-huggingface
+langchain-community
+faiss-cpu
+
+# LLM
+groq
+langgraph
+os
+fitz
