@@ -1,10 +1,10 @@
 # services/rag/vectorstore.py
 import os
 import uuid
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import PointStruct
-from services.rag.embeddings import get_embeddings
 from dotenv import load_dotenv
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import PointStruct, Filter, FieldCondition, MatchValue
+from services.rag.embeddings import get_embeddings
 
 load_dotenv()
 
@@ -12,79 +12,69 @@ QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION")
 
-_vectorstore = None
+_vectorstore_instance = None
+
 
 def get_vectorstore():
-    """
-    Singleton getter for VectorStore
-    """
-    global _vectorstore
-    if _vectorstore is None:
-        _vectorstore = VectorStore()
-    return _vectorstore
+    global _vectorstore_instance
+    if _vectorstore_instance is None:
+        _vectorstore_instance = VectorStore()
+    return _vectorstore_instance
+
 
 class VectorStore:
     def __init__(self):
-        self.client = QdrantClient(
-            url=QDRANT_URL,
-            api_key=QDRANT_API_KEY
-        )
+        if not QDRANT_URL or not QDRANT_COLLECTION:
+            raise ValueError("Missing Qdrant configuration")
+
+        self.client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
         self.collection_name = QDRANT_COLLECTION
         self.embedder = get_embeddings()
 
-    # --------------------------
-    # Add Documents to Qdrant
-    # --------------------------
-    def add_documents(self, docs: list[str], ids: list = None, payloads: list[dict] = None):
-        """
-        docs: list of document strings
-        ids: optional list of IDs (int or UUID strings)
-        payloads: optional list of payload dicts
-        """
-        # Generate embeddings
-        vectors = self.embedder.embed_documents(docs)
-
-        # Generate IDs if not provided
-        if ids is None:
-            ids = list(range(len(docs)))
-
-        # Generate payloads if not provided
-        if payloads is None:
-            payloads = [{"text": doc} for doc in docs]
-
-        # Validate lengths
-        if not (len(docs) == len(vectors) == len(ids) == len(payloads)):
-            raise ValueError("Length mismatch between docs, vectors, ids, payloads")
-
-        # Create PointStructs
-        points = [
-            PointStruct(
-                id=ids[i],
-                vector=vectors[i],
-                payload=payloads[i]
+        # Ensure collection exists
+        try:
+            self.client.get_collection(collection_name=self.collection_name)
+        except Exception:
+            self.client.recreate_collection(
+                collection_name=self.collection_name,
+                vector_size=self.embedder.dimension,
+                distance="Cosine"
             )
-            for i in range(len(docs))
-        ]
 
-        # Upsert into Qdrant
-        self.client.upsert(
-            collection_name=self.collection_name,
-            points=points
-        )
+    def add_documents(self, docs: list[str], ids: list = None, payloads: list[dict] = None):
+        if not isinstance(docs, list):
+            docs = [docs]
+        vectors = self.embedder.embed_documents(docs)
+        if ids is None:
+            ids = [str(uuid.uuid4()) for _ in docs]
+        if payloads is None:
+            payloads = [{"text": d} for d in docs]
 
-    # --------------------------
-    # Query
-    # --------------------------
-    def query(self, text: str, k: int = 3):
-        """
-        Query Qdrant for most similar documents
-        """
+        points = [PointStruct(id=ids[i], vector=vectors[i], payload=payloads[i]) for i in range(len(docs))]
+        self.client.upsert(collection_name=self.collection_name, points=points)
+
+    def query(self, text: str, k: int = 5, metadata_filter: dict = None):
         vector = self.embedder.embed_query(text)
+        q_filter = None
+        if metadata_filter:
+            conditions = [FieldCondition(key=key, match=MatchValue(value=value)) for key, value in metadata_filter.items()]
+            q_filter = Filter(must=conditions)
 
-        search_result = self.client.search(
+        # Run the search
+        result = self.client.search(
             collection_name=self.collection_name,
             query_vector=vector,
-            limit=k
+            limit=k,
+            query_filter=q_filter
         )
 
-        return [hit.payload.get("text", "") for hit in search_result]
+        # Only include results that have actual payload
+        chunks = [hit.payload for hit in result if hit.payload is not None]
+        return chunks
+
+
+    def delete_by_source(self, source_type: str):
+        self.client.delete(
+            collection_name=self.collection_name,
+            filter=Filter(must=[FieldCondition(key="source_type", match=MatchValue(value=source_type))])
+        )

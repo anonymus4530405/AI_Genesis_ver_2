@@ -1,33 +1,49 @@
-# services/rag/ingest_web.py
+import uuid
 import requests
 from bs4 import BeautifulSoup
 from services.rag.vectorstore import get_vectorstore
 
-def split_text_into_chunks(text: str, max_words: int = 50):
-    words = text.split()
-    chunks = []
-    for i in range(0, len(words), max_words):
-        chunk = " ".join(words[i:i+max_words])
-        chunks.append(chunk)
-    return chunks
+vs = get_vectorstore()
+CHUNK_SIZE = 800  # max characters per chunk
 
 def ingest_web(url: str):
-    # Fetch webpage
-    res = requests.get(url)
-    soup = BeautifulSoup(res.text, "html.parser")
+    """
+    Ingest a web page into the vector store in character-based chunks.
+    Keeps each chunk around CHUNK_SIZE characters for embedding purposes.
+    """
+    try:
+        html = requests.get(url, timeout=15).text
+    except Exception as e:
+        return {"status": "failed", "reason": str(e)}
 
-    # Extract main text
-    paragraphs = soup.find_all("p")
-    text = "\n".join([p.get_text() for p in paragraphs]).strip()
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(separator="\n")
+    lines = [line.strip() for line in text.split("\n") if len(line.strip()) >= 50]
 
-    if not text:
-        return []
+    buffer = ""
+    chunks_count = 0
 
-    # Split text into chunks
-    chunks = split_text_into_chunks(text)
+    for line in lines:
+        # Add line to buffer
+        if len(buffer) + len(line) + 1 <= CHUNK_SIZE:
+            buffer += " " + line
+        else:
+            # If buffer is full, add to vector store
+            vs.add_documents(
+                docs=[buffer.strip()],
+                ids=[str(uuid.uuid4())],
+                payloads=[{"source_type": "web", "url": url}]
+            )
+            chunks_count += 1
+            buffer = line  # start new buffer with current line
 
-    # Add to vectorstore
-    vs = get_vectorstore()
-    vs.add_documents(chunks)
+    # Add any leftover text as final chunk
+    if buffer.strip():
+        vs.add_documents(
+            docs=[buffer.strip()],
+            ids=[str(uuid.uuid4())],
+            payloads=[{"source_type": "web", "url": url}]
+        )
+        chunks_count += 1
 
-    return chunks
+    return {"status": "success", "chunks": chunks_count}
