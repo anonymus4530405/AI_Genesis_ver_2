@@ -7,7 +7,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-TABLE_NAME = "memory_store"  # your Supabase table with jsonb column
+TABLE_NAME = "memory_state"  # your Supabase table with jsonb column
 
 class MemoryManager:
     def __init__(self):
